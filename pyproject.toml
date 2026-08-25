@@ -85,7 +85,13 @@ trackio = [
     "trackio<1.0.0",
 ]
 verifiers = [
-    "verifiers>=0.1.9,<0.1.10",
+    # verifiers >=0.3.1 split into `verifiers.v1` + `verifiers.legacy`. The
+    # classic surface this recipe uses (`import verifiers as vf`, `Environment`,
+    # `run_group`, `evaluate`) is still served, via `verifiers.legacy`, but two
+    # signatures changed incompatibly: rollout entrypoints now take a
+    # `vf.Client` (or `vf.ClientConfig`) instead of a raw `AsyncOpenAI`, and
+    # `GenerateOutputs` is row-oriented (`{"outputs": [...], "metadata": ...}`).
+    "verifiers>=0.3.1,<0.5",
     "openai>=1.0.0",
 ]
 inspect = [
