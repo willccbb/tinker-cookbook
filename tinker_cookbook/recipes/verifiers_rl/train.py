@@ -7,17 +7,17 @@ from datetime import datetime
 from typing import Any, cast
 
 import chz
-from verifiers.utils.async_utils import maybe_semaphore
 
 from tinker_cookbook import cli_utils, model_info, renderers
 from tinker_cookbook.completers import TinkerTokenCompleter, TokenCompleter
-from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerAsyncOpenAIClient
+from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerChatCompletionsClient
 from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
     VerifiersEnvGroupBuilder,
     VerifiersRLDatasetBuilder,
-    convert_states_to_trajectory_group,
+    convert_outputs_to_trajectory_group,
 )
 from tinker_cookbook.rl import rollouts, train
+from tinker_cookbook.rl.rollout_limits import TerminationRewardPolicy
 from tinker_cookbook.rl.rollout_strategy import RolloutStrategy
 from tinker_cookbook.rl.types import EnvGroupBuilder, TrajectoryGroup
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
@@ -46,6 +46,10 @@ class CLIConfig:
     max_tokens: int = 512
     temperature: float = 1.0
     kl_penalty_coef: float = 0.0
+    # Retained for backwards compatibility only. verifiers removed the
+    # per-group `gen_sem` / `score_sem` arguments to `Environment.run_group`,
+    # so these no longer have anything to bind to; concurrency is bounded by
+    # `groups_per_batch` and the rollout pipeline. Setting either logs a warning.
     max_concurrent_generation: int = -1
     max_concurrent_scoring: int = -1
 
@@ -73,7 +77,14 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
 
     env_args = json.loads(cli_config.vf_env_args) if cli_config.vf_env_args else {}
 
-    shared_client: TinkerAsyncOpenAIClient | None = None
+    if cli_config.max_concurrent_generation != -1 or cli_config.max_concurrent_scoring != -1:
+        logger.warning(
+            "max_concurrent_generation/max_concurrent_scoring are ignored: verifiers "
+            "no longer accepts per-group semaphores in Environment.run_group. Use "
+            "groups_per_batch to bound concurrency."
+        )
+
+    shared_client: TinkerChatCompletionsClient | None = None
     shared_renderer: renderers.Renderer | None = None
     local_tokenizer: Tokenizer | None = None
 
@@ -81,10 +92,12 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
         builder: EnvGroupBuilder,
         policy: TokenCompleter,
         strategy: RolloutStrategy | None = None,
+        termination: TerminationRewardPolicy | None = None,
     ) -> TrajectoryGroup:
-        # `strategy` is accepted for signature compatibility but unused: the
-        # verifiers environment runs and scores the whole group itself.
-        del strategy
+        # `strategy` and `termination` are accepted for signature compatibility
+        # but unused: the verifiers environment runs and scores the whole group
+        # itself.
+        del strategy, termination
         nonlocal shared_client, shared_renderer, local_tokenizer
 
         # initialize tokenizer and renderer lazily
@@ -98,7 +111,7 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
 
         sampling_client = cast(TinkerTokenCompleter, policy).sampling_client
         if shared_client is None:
-            shared_client = TinkerAsyncOpenAIClient(
+            shared_client = TinkerChatCompletionsClient(
                 sampling_client, shared_renderer, local_tokenizer
             )
         else:
@@ -107,22 +120,20 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
         vf_builder = cast(VerifiersEnvGroupBuilder, builder)
         rollout_inputs = vf_builder.get_rollout_inputs(cli_config.group_size)
 
-        gen_sem = await maybe_semaphore(cli_config.max_concurrent_generation)
-        score_sem = await maybe_semaphore(cli_config.max_concurrent_scoring)
-
-        states = await vf_builder.vf_env.run_group(
+        outputs = await vf_builder.vf_env.run_group(
             group_inputs=rollout_inputs,
             client=shared_client,
             model="tinker",
-            gen_sampling_args={
+            sampling_args={
                 "max_tokens": cli_config.max_tokens,
                 "temperature": cli_config.temperature,
             },
-            gen_sem=gen_sem,
-            score_sem=score_sem,
+            # `trajectory` carries the prompt/completion token IDs and logprobs
+            # we train on, and it is opt-in on RolloutOutput.
+            state_columns=["trajectory"],
         )
 
-        return convert_states_to_trajectory_group(states)
+        return convert_outputs_to_trajectory_group(outputs)
 
     # Override do_group_rollout in the rollouts module, where the rollout
     # pipeline resolves it. (Rebinding the name re-exported on rl.train has

@@ -30,15 +30,27 @@ def get_vf_env() -> vf.Environment | None:
     return _vf_env_ctx.get()
 
 
-def convert_states_to_trajectory_group(states: list[vf.State]) -> TrajectoryGroup:
-    """Convert verifiers States to tinker TrajectoryGroup."""
+def convert_outputs_to_trajectory_group(outputs: list[vf.RolloutOutput]) -> TrajectoryGroup:
+    """Convert verifiers RolloutOutputs to a tinker TrajectoryGroup.
+
+    ``Environment.run_group`` returns ``list[RolloutOutput]``. ``trajectory`` is
+    an opt-in field there, so callers must ask for it via
+    ``state_columns=["trajectory"]`` -- otherwise every rollout arrives with no
+    token IDs and training silently sees empty trajectories.
+    """
     trajectories_G: list[Trajectory] = []
     final_rewards_G: list[float] = []
     metrics_G: list[dict[str, float | int]] = []
 
-    for state in states:
+    for state in outputs:
         transitions: list[Transition] = []
-        trajectory_steps = state.get("trajectory", [])
+        if "trajectory" not in state:
+            raise ValueError(
+                "verifiers RolloutOutput has no `trajectory` field. `trajectory` is "
+                'opt-in: pass state_columns=["trajectory"] to '
+                "Environment.run_group so token IDs come back with each rollout."
+            )
+        trajectory_steps = state.get("trajectory") or []
 
         for i, step in enumerate(trajectory_steps):
             tokens_data = step.get("tokens")
@@ -102,7 +114,7 @@ class VerifiersRLDataset(RLDataset):
                     vf_env=self.vf_env,
                     prompt=row["prompt"],
                     example_id=row["example_id"],
-                    task=row["task"],
+                    task=row.get("task", ""),
                     answer=row.get("answer", ""),
                     info=row.get("info", {}),
                 )
@@ -124,11 +136,15 @@ class VerifiersRLDatasetBuilder(RLDatasetBuilder):
             vf_env = vf.load_environment(self.vf_env_id, **self.vf_env_args)
             set_vf_env(vf_env)
         ds = vf_env.get_dataset(n=self.dataset_n, seed=self.dataset_seed)
+        # `task` is no longer a guaranteed column: verifiers only emits it when
+        # the source dataset had one. EnvGroup routing now lives in
+        # `info["env_id"]`, so `task` is used for logging tags only.
+        has_task = "task" in ds.column_names
         rows = [
             {
                 "prompt": ds["prompt"][i],
                 "example_id": ds["example_id"][i],
-                "task": ds["task"][i],
+                **({"task": ds["task"][i]} if has_task else {}),
                 **({"answer": ds["answer"][i]} if "answer" in ds.column_names else {}),
                 **({"info": ds["info"][i]} if "info" in ds.column_names else {}),
             }
@@ -188,11 +204,15 @@ class VerifiersEnvGroupBuilder(EnvGroupBuilder):
         self.info = state["info"]
 
     def get_rollout_inputs(self, group_size: int) -> list[vf.RolloutInput]:
+        # `task` is deliberately not forwarded: verifiers now treats a rollout
+        # input's `task` as a structured task payload and rejects plain strings
+        # ("Plain string task routes are no longer supported; use
+        # info['env_id'] for routing"). EnvGroup routing rides on `info`, which
+        # is forwarded, and `self.task` is kept for logging tags only.
         return [
             vf.RolloutInput(
                 prompt=self.prompt,
                 answer=self.answer,
-                task=self.task,
                 info=self.info,
                 example_id=self.example_id,
             )
