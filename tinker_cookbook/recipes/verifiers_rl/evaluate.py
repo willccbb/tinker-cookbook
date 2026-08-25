@@ -11,7 +11,7 @@ import verifiers as vf
 from verifiers.utils.message_utils import messages_to_printable
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
-from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerAsyncOpenAIClient
+from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerChatCompletionsClient
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
 
@@ -24,6 +24,12 @@ def log_results(
     rollouts_per_example: int,
     time_s: float,
 ):
+    # `GenerateOutputs` is row-oriented: {"outputs": [RolloutOutput], "metadata": ...},
+    # where each RolloutOutput carries its own prompt/completion/reward/metrics.
+    outputs = results["outputs"]
+    rewards = [output["reward"] for output in outputs]
+    metric_names = sorted({name for output in outputs for name in (output["metrics"] or {})})
+
     print(f"Evaluation completed in {time_s:.2f} seconds")
     print("--- Evaluation ---")
     print(f"Environment: {vf_env_id}")
@@ -31,35 +37,34 @@ def log_results(
     print(f"Examples: {num_examples}")
     print(f"Rollouts per example: {rollouts_per_example}")
     print("--- Example ---")
-    printable_prompts = [messages_to_printable(p) for p in results["prompt"]]
-    printable_completions = [messages_to_printable(c) for c in results["completion"]]
+    printable_prompts = [messages_to_printable(output["prompt"] or []) for output in outputs]
+    printable_completions = [
+        messages_to_printable(output["completion"] or []) for output in outputs
+    ]
     vf.print_prompt_completions_sample(
         prompts=printable_prompts,
         completions=printable_completions,
-        errors=[],  # Required argument added in verifiers 0.1.9
-        rewards=results["reward"],
+        errors=[output.get("error") for output in outputs],
+        rewards=rewards,
         step=0,
     )
     print("--- All ---")
     print("Rewards:")
-    print(
-        f"reward: avg - {sum(results['reward']) / len(results['reward']):.3f}, std - {np.std(results['reward']):.3f}"
-    )
-    r = rollouts_per_example
-    n = len(results["reward"]) // r
-    for i in range(r):
-        # rounded to 3 decimal places
-        trials = [round(results["reward"][(i * n) + j], 3) for j in range(n)]
-        out = f"r{i + 1}: {trials}"
-        print(out)
-    for k in results["metrics"]:
-        v = results["metrics"][k]
-        print(f"{k}: avg - {sum(v) / len(v):.3f}, std - {np.std(v):.3f}")
+    print(f"reward: avg - {sum(rewards) / len(rewards):.3f}, std - {np.std(rewards):.3f}")
+
+    def print_trials(values: list[float]) -> None:
+        r = rollouts_per_example
+        n = len(values) // r
         for i in range(r):
             # rounded to 3 decimal places
-            trials = [round(v[(i * n) + j], 3) for j in range(n)]
-            out = f"r{i + 1}: {trials}"
-            print(out)
+            trials = [round(values[(i * n) + j], 3) for j in range(n)]
+            print(f"r{i + 1}: {trials}")
+
+    print_trials(rewards)
+    for name in metric_names:
+        values = [float((output["metrics"] or {}).get(name, 0.0)) for output in outputs]
+        print(f"{name}: avg - {sum(values) / len(values):.3f}, std - {np.std(values):.3f}")
+        print_trials(values)
 
 
 async def evaluate(
@@ -110,9 +115,12 @@ async def evaluate(
     else:
         sampling = service.create_sampling_client(base_model=model_name)
 
-    client = TinkerAsyncOpenAIClient(sampling, renderer, tokenizer)
+    client = TinkerChatCompletionsClient(sampling, renderer, tokenizer)
     start_time = time.time()
-    results = env.evaluate_sync(
+    # `evaluate_sync` now refuses to run inside an already-running event loop
+    # unless `verifiers[notebook]` (nest_asyncio) is installed, and this
+    # function is always awaited. Use the async entrypoint directly.
+    results = await env.evaluate(
         client=client,
         model=model_name,
         num_examples=num_examples,

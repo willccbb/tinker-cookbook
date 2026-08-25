@@ -30,7 +30,19 @@ You can also evaluate offline:
 python -m tinker_cookbook.recipes.verifiers_rl.evaluate vf_env_id=env-id vf_env_args='{}' ...
 ```
 
-This recipe also includes a standalone `AsyncOpenAI`-compatible client implemented with Tinker, which can be adapted for other applications.
+This recipe requires `verifiers>=0.3.1`, installed by `pip install 'tinker_cookbook[verifiers]'`.
+
+This recipe also includes a standalone `AsyncOpenAI`-compatible client implemented with Tinker (`TinkerAsyncOpenAIClient`), which can be adapted for other applications, plus `TinkerChatCompletionsClient` — a thin `vf.Client` wrapper around it. verifiers' rollout entrypoints (`Environment.evaluate`, `Environment.run_group`) take a `vf.Client` or `vf.ClientConfig` rather than a raw `AsyncOpenAI`, so use the wrapper when handing Tinker sampling to an environment:
+
+```python
+from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerChatCompletionsClient
+
+client = TinkerChatCompletionsClient(sampling_client, renderer, tokenizer)
+results = await env.evaluate(client=client, model=model_name, ...)
+rollouts = results["outputs"]  # GenerateOutputs is row-oriented
+```
+
+(Use `await env.evaluate(...)` rather than `env.evaluate_sync(...)` from async code — the sync wrapper needs `verifiers[notebook]` to run inside an already-running event loop.)
 
 **Potential footgun:**
 
