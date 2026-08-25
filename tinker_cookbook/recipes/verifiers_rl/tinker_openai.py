@@ -6,6 +6,11 @@ Implements OpenAI client semantics for:
 - completions.create(...)
 
 Returns OpenAI types (ChatCompletion / Completion) constructed from sampled tokens.
+
+``TinkerChatCompletionsClient`` adapts that client to the ``vf.Client``
+interface that current ``verifiers`` requires at its rollout entrypoints
+(``Environment.evaluate``, ``Environment.run_group``); passing a bare
+``AsyncOpenAI`` there raises ``ValueError: Unsupported client type``.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import time
 from typing import Any, Literal, overload
 
 import tinker
+import verifiers as vf
 from openai import AsyncOpenAI
 from openai._streaming import AsyncStream
 from openai.resources.chat import AsyncChat as OpenAIAsyncChat
@@ -263,3 +269,60 @@ class TinkerAsyncCompletionStream(AsyncStream[Completion]):
 
     async def get_final_response(self) -> Completion:
         return self._final
+
+
+class TinkerChatCompletionsClient(vf.OpenAIChatCompletionsClient):
+    """``vf.Client`` backed by Tinker sampling.
+
+    verifiers' rollout entrypoints take a ``vf.Client`` (or a ``vf.ClientConfig``
+    describing an HTTP endpoint), not a raw ``AsyncOpenAI``. This subclass keeps
+    everything verifiers already knows how to do -- message conversion, response
+    parsing, token/logprob extraction, error classification -- and only replaces
+    the transport: instead of POSTing to ``/chat/completions``, it samples from a
+    ``tinker.SamplingClient``.
+
+    Token IDs and logprobs reach verifiers through the same channel a
+    token-returning vLLM server uses (``response.prompt_token_ids`` and
+    ``response.choices[0].token_ids``), which is what
+    ``OpenAIChatCompletionsClient.from_native_response`` reads. That is what
+    populates ``state["trajectory"][i]["tokens"]`` for RL training.
+    """
+
+    def __init__(
+        self,
+        sampling_client: tinker.SamplingClient,
+        renderer: renderers.Renderer,
+        tokenizer: Tokenizer,
+    ) -> None:
+        self._openai_client = TinkerAsyncOpenAIClient(sampling_client, renderer, tokenizer)
+        super().__init__(self._openai_client)
+
+    @property
+    def openai_client(self) -> TinkerAsyncOpenAIClient:
+        return self._openai_client
+
+    def set_sampling_client(self, sampling_client: tinker.SamplingClient) -> None:
+        """Point at a new policy checkpoint without rebuilding the client."""
+        self._openai_client.set_sampling_client(sampling_client)
+
+    async def get_native_response(
+        self,
+        prompt: Any,
+        model: str,
+        sampling_args: dict[str, Any],
+        tools: list[Any] | None = None,
+        **kwargs: Any,
+    ) -> ChatCompletion:
+        # `state` / `extra_headers` are HTTP-transport concerns; Tinker sampling
+        # has no use for them.
+        kwargs.pop("state", None)
+        kwargs.pop("extra_headers", None)
+        request_args = {k: v for k, v in (sampling_args or {}).items() if v is not None}
+        response = await self._openai_client.chat.completions.create(
+            model=model,
+            messages=list(prompt),
+            **({"tools": tools} if tools else {}),
+            **request_args,
+        )
+        assert isinstance(response, ChatCompletion)
+        return response
