@@ -158,7 +158,8 @@ class CLIConfig:
     max_concurrent: int = 32
     max_tokens: int = 1024
     temperature: float = 1.0
-    # JSON chat-template kwargs threaded to the tml renderer that tokenizes
+    # JSON chat-template kwargs passed through verifiers' train client to the
+    # `renderers` chat template that tokenizes
     # each turn, e.g. '{"enable_thinking": false}' for Qwen thinking control.
     chat_template_kwargs: str | None = None
 

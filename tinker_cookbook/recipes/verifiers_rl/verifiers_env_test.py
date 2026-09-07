@@ -193,3 +193,133 @@ class TestConvertEpisodesToTrajectoryGroup:
         )
         with pytest.raises(ValueError, match="branches"):
             convert_episodes_to_trajectory_group([episode])
+
+    def test_errored_trace_is_failed(self) -> None:
+        """A trace that errored keeps its tokens on the graph but must not train."""
+        import verifiers.v1 as vf
+
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                _assistant_node(parent=0, scaffold=[], sampled=[2], logprobs=[-0.1]),
+            ],
+            rewards={"correct": vf.Reward(score=0.0)},
+            metrics={"accuracy": 0.0},
+        )
+        episode.traces[0].ok = False
+        group = convert_episodes_to_trajectory_group([episode])
+
+        assert group.final_rewards_G == [0.0]
+        assert group.metrics_G == [{"accuracy": 0.0, "rollout_failed": 1.0}]
+        [transition] = group.trajectories_G[0].transitions
+        assert transition.ac.tokens == []
+
+    def test_failed_episode_standing_wins_over_ok_trace(self) -> None:
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                _assistant_node(parent=0, scaffold=[], sampled=[2], logprobs=[-0.1]),
+            ]
+        )
+        episode.ok = False
+        group = convert_episodes_to_trajectory_group([episode])
+        assert group.metrics_G == [{"rollout_failed": 1.0}]
+        assert group.trajectories_G[0].transitions[0].ac.tokens == []
+
+    def test_non_trainable_agent_is_rejected(self) -> None:
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                _assistant_node(parent=0, scaffold=[], sampled=[2], logprobs=[-0.1]),
+            ]
+        )
+        episode.traces[0].agent.trainable = False
+        with pytest.raises(ValueError, match="not trainable"):
+            convert_episodes_to_trajectory_group([episode])
+
+    def test_missing_logprobs_raise(self) -> None:
+        """The endpoint must return one logprob per sampled token; never invent them."""
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                _assistant_node(parent=0, scaffold=[], sampled=[2, 3], logprobs=[]),
+            ]
+        )
+        with pytest.raises(ValueError, match="logprobs"):
+            convert_episodes_to_trajectory_group([episode])
+
+
+def _branch_standing_available() -> bool:
+    import verifiers.v1 as vf
+
+    return "trainable" in vf.Branch.model_fields
+
+
+@pytest.mark.skipif(
+    not _has_verifiers or not _branch_standing_available(),
+    reason="verifiers release without branch standing (pre-#2521)",
+)
+class TestNonTrainableBranches:
+    """A rejected compaction attempt is a dangling leaf verifiers marks non-trainable."""
+
+    @staticmethod
+    def _compaction_attempt(parent: int, sampled: list[int], logprobs: list[float]):
+        import verifiers.v1 as vf
+
+        node = _assistant_node(parent=parent, scaffold=[], sampled=sampled, logprobs=logprobs)
+        # Built from data so this file also type-checks against releases without
+        # semantic edges; the class is skipped there at runtime.
+        return vf.MessageNode.model_validate(
+            {
+                **node.model_dump(),
+                "semantic_parents": [{"node": parent, "type": "compaction_attempt"}],
+            }
+        )
+
+    def test_rejected_attempt_beside_real_path_is_excluded(self) -> None:
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                _assistant_node(parent=0, scaffold=[], sampled=[2], logprobs=[-0.1]),
+                self._compaction_attempt(parent=0, sampled=[9], logprobs=[-0.9]),
+            ]
+        )
+        assert [getattr(b, "trainable", None) for b in episode.traces[0].branches] == [True, False]
+        group = convert_episodes_to_trajectory_group([episode])
+        [transition] = group.trajectories_G[0].transitions
+        assert transition.ac.tokens == [2]
+
+    def test_only_rejected_attempts_is_rejected(self) -> None:
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+
+        episode = _episode(
+            nodes=[
+                _user_node([1]),
+                self._compaction_attempt(parent=0, sampled=[9], logprobs=[-0.9]),
+            ]
+        )
+        assert [getattr(b, "trainable", None) for b in episode.traces[0].branches] == [False]
+        with pytest.raises(ValueError, match="compaction"):
+            convert_episodes_to_trajectory_group([episode])

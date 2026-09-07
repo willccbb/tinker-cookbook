@@ -23,7 +23,7 @@ Two `vf_env_args` pins worth knowing:
 - `{"agent": {"harness": {"id": "null"}}}` runs a plain chat agent on a taskset that doesn't bundle its own harness (the fallback harness is `bash`, a coding agent).
 - `{"agent": {"runtime": {"type": "subprocess"}}}` runs harness programs as local subprocesses. The verifiers default runtime provisions Prime sandboxes, which costs money and is capped per account — pin `subprocess` (or `docker`) for local training unless you want that isolation.
 
-`chat_template_kwargs` (JSON) is threaded to the `tml-renderers` renderer that tokenizes each turn — e.g. `{"enable_thinking": false}` to switch Qwen thinking off so short `max_tokens` budgets aren't consumed by reasoning.
+`chat_template_kwargs` (JSON) is passed through verifiers' train client to the chat template of the [`renderers`](https://github.com/PrimeIntellect-ai/renderers) package that tokenizes each turn — e.g. `{"enable_thinking": false}` to switch Qwen thinking off so short `max_tokens` budgets aren't consumed by reasoning.
 
 You can also evaluate offline:
 
@@ -35,10 +35,10 @@ This recipe requires `verifiers>=0.3.1`, installed by `pip install 'tinker_cookb
 
 ## How it plugs in
 
-verifiers' train client renders each turn to token IDs with `tml-renderers` and POSTs them to a vLLM-style `/inference/v1/generate` endpoint, expecting sampled token IDs and per-token logprobs back. That endpoint is the one seam where an inference engine plugs into the v1 rollout stack, so this recipe serves it locally over a `tinker.SamplingClient` (`tinker_generate.TinkerGenerateServer`) — harness programs, interception, renderer bridging, scoring, and trace/token bookkeeping are all verifiers running natively. Each rollout comes back as a `vf.Episode` whose agent trace carries the exact sampled token IDs and logprobs, which `verifiers_env.convert_episodes_to_trajectory_group` turns into tinker trajectories.
+verifiers' train client renders each turn to token IDs with Prime Intellect's `renderers` package (a verifiers dependency, distinct from this cookbook's `tinker_cookbook.renderers`) and POSTs them to a vLLM-style `/inference/v1/generate` endpoint, expecting sampled token IDs and per-token logprobs back. That endpoint is the one seam where an inference engine plugs into the v1 rollout stack, so this recipe serves it locally over a `tinker.SamplingClient` (`tinker_generate.TinkerGenerateServer`) — harness programs, interception, renderer bridging, scoring, and trace/token bookkeeping are all verifiers running natively. Each rollout comes back as a `vf.Episode` whose agent trace carries the exact sampled token IDs and logprobs, which `verifiers_env.convert_episodes_to_trajectory_group` turns into tinker trajectories.
 
-The recipe trains single-agent environments (one agent trace per episode, one branch per trace); multi-agent or branching envs are rejected with an explicit error.
+The recipe trains single-agent environments (one agent trace per episode, one trainable branch per trace); multi-agent or branching envs, and traces whose agent is not the policy, are rejected with an explicit error. An episode or trace that verifiers marks failed stays in its group as an empty trajectory with a `rollout_failed` metric, so reward centering sees the failure; a sampled token without a logprob is an error, never a guess.
 
 **Potential footgun:**
 
-- The tokenizer/renderer used for sampling is resolved from the base model name by `tml-renderers` (pinned via `renderer_model_name`). For reasoning-mode subtleties (e.g. Qwen thinking sections being stripped or re-rendered by the chat template), check the resolved renderer's behavior against your environment's parsers before ascribing reward drops to the policy.
+- The tokenizer/renderer used for sampling is resolved from the base model name by verifiers' `renderers` dependency (pinned via `renderer_model_name`), not by this cookbook's own renderers. For reasoning-mode subtleties (e.g. Qwen thinking sections being stripped or re-rendered by the chat template), check the resolved renderer's behavior against your environment's parsers before ascribing reward drops to the policy.

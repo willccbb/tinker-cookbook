@@ -1,7 +1,7 @@
 """A local ``/inference/v1/generate`` endpoint backed by Tinker sampling.
 
 The verifiers v1 train client (``vf.TrainClientConfig``) renders each turn to
-token IDs with ``tml-renderers`` and POSTs them to a vLLM
+token IDs with Prime Intellect's ``renderers`` package and POSTs them to a vLLM
 ``/inference/v1/generate`` endpoint, expecting sampled token IDs and per-token
 logprobs back. That endpoint is the one seam where an inference engine plugs
 into the v1 rollout stack, so this module serves its wire format over a

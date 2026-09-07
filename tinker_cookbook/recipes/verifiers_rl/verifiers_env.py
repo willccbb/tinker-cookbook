@@ -73,10 +73,14 @@ def _trace_metrics(trace: vf.Trace, failed: bool = False) -> Metrics:
 def _episode_to_trajectory(episode: vf.Episode) -> tuple[Trajectory, float, Metrics]:
     """One episode -> (trajectory, final reward, metrics).
 
-    A failed episode (no trace, or a trace with no sampled tokens) becomes an
-    empty trajectory with a one-hot ``rollout_failed`` metric: it contributes
-    no training tokens but stays in the group, so reward centering sees the
-    failure instead of the group silently shrinking.
+    A failed episode (not ``ok``, no trace, a trace that is not ``ok``, or a
+    trace with no sampled tokens) becomes an empty trajectory with a one-hot
+    ``rollout_failed`` metric: it contributes no training tokens but stays in
+    the group, so reward centering sees the failure instead of the group
+    silently shrinking. Standing this recipe cannot train (a non-trainable
+    agent, or a trace whose only branches are non-trainable) is rejected rather
+    than skipped, for the same reason; a non-trainable branch beside the real
+    path is excluded, as verifiers intends.
     """
     failed = Trajectory(
         transitions=[
@@ -97,14 +101,30 @@ def _episode_to_trajectory(episode: vf.Episode) -> tuple[Trajectory, float, Metr
             "single-agent verifiers environments (one trace per episode)"
         )
     trace = episode.traces[0]
-    branches = trace.branches
+    if not trace.agent.trainable:
+        raise ValueError(
+            f"trace from agent {trace.agent.name!r} is not trainable; this recipe trains "
+            "single-agent verifiers environments whose one agent is the policy"
+        )
+    if not episode.ok or not trace.ok:
+        return failed, trace.reward, _trace_metrics(trace, failed=True)
+    # verifiers marks a rejected compaction attempt (a leaf the harness never
+    # resumed from) as a non-trainable branch since #2521 (after 0.3.1); earlier
+    # releases have no compaction, so every branch there is trainable.
+    branches = [b for b in trace.branches if getattr(b, "trainable", True)]
     if len(branches) > 1:
         raise ValueError(
-            f"trace has {len(branches)} branches; this recipe trains linear rollouts "
-            "(one root-to-leaf path per trace)"
+            f"trace has {len(branches)} trainable branches; this recipe trains linear "
+            "rollouts (one root-to-leaf path per trace)"
         )
     if not branches:
+        if trace.branches:
+            raise ValueError(
+                "trace's only branches are compaction attempts the harness never resumed "
+                "from; verifiers marks them non-trainable and this recipe cannot train them"
+            )
         return failed, trace.reward, _trace_metrics(trace, failed=True)
+    branch = branches[0]
 
     # Walk the branch: every sampled node is one action, and its observation is
     # the full token context before it (previous nodes plus the node's own
@@ -112,7 +132,7 @@ def _episode_to_trajectory(episode: vf.Episode) -> tuple[Trajectory, float, Metr
     # other by prefix, which trajectory_to_data merges into a single datum.
     spans: list[tuple[list[int], list[int], list[float]]] = []
     context: list[int] = []
-    for node in branches[0].nodes:
+    for node in branch.nodes:
         num_sampled = sum(node.mask)
         if not node.sampled or num_sampled == 0:
             context.extend(node.token_ids)
@@ -122,10 +142,14 @@ def _episode_to_trajectory(episode: vf.Episode) -> tuple[Trajectory, float, Metr
                 "sampled tokens are not a suffix of the assistant node; cannot map "
                 "this trace onto (observation, action) transitions"
             )
+        if len(node.logprobs) != num_sampled:
+            raise ValueError(
+                f"assistant node carries {len(node.logprobs)} logprobs for {num_sampled} "
+                "sampled tokens; the generate endpoint must return one logprob per token"
+            )
         scaffold = node.token_ids[: len(node.token_ids) - num_sampled]
         sampled = node.token_ids[len(node.token_ids) - num_sampled :]
-        logprobs = list(node.logprobs) if node.logprobs else [0.0] * num_sampled
-        spans.append((context + scaffold, sampled, logprobs))
+        spans.append((context + scaffold, sampled, list(node.logprobs)))
         context.extend(node.token_ids)
 
     if not spans:
