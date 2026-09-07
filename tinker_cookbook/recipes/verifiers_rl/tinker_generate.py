@@ -24,6 +24,15 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 
+_SAMPLING_KEYS = frozenset(
+    {"max_tokens", "temperature", "top_p", "top_k", "seed", "stop_token_ids"}
+)
+"""Request keys mapped onto ``tinker.SamplingParams``."""
+_WIRE_KEYS = frozenset({"logprobs", "skip_special_tokens"})
+"""Keys the renderers client always sends for token-in/token-out bookkeeping; the
+endpoint always returns per-token logprobs and raw token ids, so they carry no choice."""
+
+
 class TinkerGenerateServer:
     """Serves vLLM's token-in/token-out generate API over Tinker sampling.
 
@@ -115,6 +124,14 @@ class TinkerGenerateServer:
                 status=400,
             )
         sampling_params = body.get("sampling_params") or {}
+        unsupported = sorted(set(sampling_params) - _SAMPLING_KEYS - _WIRE_KEYS)
+        if unsupported:
+            # verifiers passes provider-specific sampling keys through; silently
+            # dropping one would run a different distribution than requested.
+            return web.json_response(
+                {"error": f"unsupported sampling_params for the Tinker endpoint: {unsupported}"},
+                status=400,
+            )
         stop = sampling_params.get("stop_token_ids") or None
         max_tokens = sampling_params.get("max_tokens")
         params = tinker.SamplingParams(

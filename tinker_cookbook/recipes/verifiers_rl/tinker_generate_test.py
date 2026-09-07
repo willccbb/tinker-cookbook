@@ -135,3 +135,29 @@ async def test_train_client_config_points_at_the_server() -> None:
         ):
             assert response.status == 200
             assert (await response.json())["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_unsupported_sampling_params() -> None:
+    """A sampling key the endpoint cannot honor is an error, never a silent drop."""
+    from tinker_cookbook.recipes.verifiers_rl.tinker_generate import TinkerGenerateServer
+
+    fake = _FakeSamplingClient()
+    async with TinkerGenerateServer(fake) as server:  # type: ignore[arg-type]
+        status, data = await _post_generate(
+            server,
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_params": {
+                    "max_tokens": 8,
+                    "logprobs": 1,
+                    "skip_special_tokens": False,
+                    "repetition_penalty": 1.1,
+                    "stop": ["</answer>"],
+                },
+            },
+        )
+
+    assert status == 400
+    assert "repetition_penalty" in data["error"] and "stop" in data["error"]
+    assert fake.calls == []

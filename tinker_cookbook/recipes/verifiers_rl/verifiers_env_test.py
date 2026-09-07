@@ -264,6 +264,39 @@ class TestConvertEpisodesToTrajectoryGroup:
         with pytest.raises(ValueError, match="logprobs"):
             convert_episodes_to_trajectory_group([episode])
 
+    def test_failed_slot_yields_no_datum_and_keeps_centering(self) -> None:
+        """Through the cookbook's own advantage and datum assembly: the failed
+        slot contributes no training datum, but its zero reward still centers
+        the successful slot's advantage."""
+        import verifiers.v1 as vf
+
+        from tinker_cookbook.recipes.verifiers_rl.verifiers_env import (
+            convert_episodes_to_trajectory_group,
+        )
+        from tinker_cookbook.rl.data_processing import (
+            assemble_training_data,
+            compute_advantages,
+        )
+
+        ok = _episode(
+            nodes=[
+                _user_node([1, 2]),
+                _assistant_node(parent=0, scaffold=[3], sampled=[4, 5], logprobs=[-0.1, -0.2]),
+            ],
+            rewards={"correct": vf.Reward(score=1.0)},
+        )
+        failed = vf.Episode(task=ok.task, traces=[], ok=False)
+        group = convert_episodes_to_trajectory_group([ok, failed])
+        advantages = compute_advantages([group])
+        data, metadata = assemble_training_data([group], advantages)
+
+        assert advantages[0].tolist() == [pytest.approx(0.5), pytest.approx(-0.5)]
+        assert metadata == [{"group_idx": 0, "traj_idx": 0}]
+        [datum] = data
+        # The datum is the right-shifted input with left-shifted targets.
+        assert datum.model_input.to_ints() == [1, 2, 3, 4]
+        assert datum.loss_fn_inputs["target_tokens"].tolist() == [2, 3, 4, 5]
+
 
 def _branch_standing_available() -> bool:
     import verifiers.v1 as vf
