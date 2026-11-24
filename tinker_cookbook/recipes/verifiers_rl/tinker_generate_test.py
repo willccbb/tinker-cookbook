@@ -70,6 +70,8 @@ async def test_generate_returns_vllm_wire_format() -> None:
     entries = choice["logprobs"]["content"]
     assert [entry["token"] for entry in entries] == ["token_id:7", "token_id:8", "token_id:9"]
     assert [entry["logprob"] for entry in entries] == [-0.1, -0.2, -0.3]
+    # verifiers' train client requires `usage` on its development builds (0.4.2.dev47).
+    assert data["usage"] == {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6}
 
     [call] = fake.calls
     assert call["prompt"].to_ints() == [1, 2, 3]

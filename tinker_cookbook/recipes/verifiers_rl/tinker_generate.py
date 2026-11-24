@@ -190,5 +190,13 @@ class TinkerGenerateServer:
                         },
                     }
                 ],
+                # Token accounting in vLLM's shape. verifiers' train client validates
+                # `usage` into the trace on its development builds (seen on
+                # 0.4.2.dev47); 0.4.1 runs the same with or without it.
+                "usage": {
+                    "prompt_tokens": len(token_ids),
+                    "completion_tokens": len(completion_ids),
+                    "total_tokens": len(token_ids) + len(completion_ids),
+                },
             }
         )
